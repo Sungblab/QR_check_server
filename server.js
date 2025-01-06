@@ -18,15 +18,19 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// 프로필 이미지 저장 디렉토리 설정
-const PROFILE_IMAGE_DIR = path.join(__dirname, "../uploads/profiles");
+// 프로필 이미지 저장 디렉토리 설정 수정
+const PROFILE_IMAGE_DIR = path.join(process.cwd(), "uploads", "profiles");
 
-// 프로필 이미지 디렉토리 생성
+// 프로필 이미지 디렉토리 생성 로직 수정
 (async () => {
   try {
+    // uploads 디렉토리 먼저 생성
+    await fs.mkdir(path.join(process.cwd(), "uploads"), { recursive: true });
+    // profiles 디렉토리 생성
     await fs.mkdir(PROFILE_IMAGE_DIR, { recursive: true });
+    console.log("프로필 이미지 디렉토리 생성 완료:", PROFILE_IMAGE_DIR);
   } catch (error) {
-    console.error("Error creating profile image directory:", error);
+    console.error("프로필 이미지 디렉토리 생성 중 오류:", error);
   }
 })();
 
@@ -58,9 +62,8 @@ const upload = multer({
   },
 });
 
-// 정적 파일 제공
-app.use(express.static(path.join(__dirname, "..")));
-app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
+// 정적 파일 제공 경로 수정
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 // WebSocket 클라이언트 관리
 const clients = new Map();
