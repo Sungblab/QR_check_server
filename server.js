@@ -944,7 +944,7 @@ app.post("/api/dinner/check", verifyToken, isReader, async (req, res) => {
     // 새로운 체크 생성
     const newCheck = new DinnerCheck({
       studentId: decryptedData.studentId,
-      timestamp: today.format("YYYY-MM-DD HH:mm:ss"),
+      timestamp: moment().tz("Asia/Seoul").format("YYYY-MM-DD HH:mm:ss"), // 현재 시간을 한국 시간으로 정확히 저장
       status: "approved",
       nonce: decryptedData.nonce,
       checkedBy: req.user.id,
@@ -1497,11 +1497,15 @@ app.get("/api/dinner/history", verifyToken, async (req, res) => {
     if (startDate || endDate) {
       queryCondition.timestamp = {};
       if (startDate) {
-        queryCondition.timestamp.$gte = moment(startDate).format("YYYY-MM-DD");
+        queryCondition.timestamp.$gte = moment(startDate)
+          .tz("Asia/Seoul")
+          .startOf('day')
+          .format("YYYY-MM-DD HH:mm:ss");
       }
       if (endDate) {
         queryCondition.timestamp.$lte = moment(endDate)
-          .endOf("day")
+          .tz("Asia/Seoul")
+          .endOf('day')
           .format("YYYY-MM-DD HH:mm:ss");
       }
     }
