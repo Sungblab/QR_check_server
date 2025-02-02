@@ -34,7 +34,7 @@ const PROFILE_IMAGE_DIR = path.join(process.cwd(), "uploads", "profiles");
   }
 })();
 
-// Multer 설정
+// Multer 설정 수정
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, PROFILE_IMAGE_DIR);
@@ -43,7 +43,7 @@ const storage = multer.diskStorage({
     const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
     cb(
       null,
-      `${req.user.id}-${uniqueSuffix}${path.extname(file.originalname)}`
+      `${req.params.userId}-${uniqueSuffix}${path.extname(file.originalname)}`
     );
   },
 });
@@ -210,27 +210,25 @@ const broadcastDinnerCheck = async (data) => {
     const student = await User.findOne({ studentId: data.studentId });
     if (!student) {
       console.error(`Student not found: ${data.studentId}`);
-      return; // 학생 정보가 없으면 브로드캐스트하지 않음
+      return;
     }
 
     const messageData = {
       type: "DINNER_CHECK",
-      timestamp: new Date().toISOString(),
+      timestamp: moment().tz("Asia/Seoul").format("YYYY-MM-DD HH:mm:ss"),
       data: {
         ...data,
         studentName: student.name,
         grade: student.grade,
         class: student.class,
         number: student.number,
-        profileImage: student.profileImage,
-        status: "approved", // 항상 approved로 설정
+        profileImage: student.profileImage ? `${process.env.SERVER_URL}${student.profileImage}` : null,
+        status: data.status || "approved",
       },
     };
 
     const message = JSON.stringify(messageData);
     console.log("Broadcasting message:", messageData); // 디버깅용 로그
-
-    const deadClients = new Set();
 
     for (const [clientId, client] of clients.entries()) {
       try {
@@ -240,25 +238,14 @@ const broadcastDinnerCheck = async (data) => {
           if (status) {
             status.lastActivity = Date.now();
           }
-        } else {
-          deadClients.add(clientId);
         }
       } catch (error) {
         console.error(`Broadcast error for client ${clientId}:`, error);
-        deadClients.add(clientId);
-      }
-    }
-
-    // 죽은 클라이언트 정리
-    if (deadClients.size > 0) {
-      deadClients.forEach((clientId) => {
-        const client = clients.get(clientId);
-        if (client) {
-          client.terminate();
-        }
+        // 에러가 발생한 클라이언트 정리
+        client.terminate();
         clients.delete(clientId);
         clientStatus.delete(clientId);
-      });
+      }
     }
   } catch (error) {
     console.error("Broadcast error:", error);
@@ -1745,7 +1732,7 @@ app.put(
   }
 );
 
-// 프로필 이미지 업로드 API
+// 프로필 이미지 업로드 API 수정
 app.post(
   "/api/admin/users/:userId/profile-image",
   verifyToken,
@@ -1775,16 +1762,13 @@ app.post(
         }
       }
 
-      // 새 프로필 이미지 경로 저장
-      const relativeImagePath = path.join(
-        "uploads",
-        "profiles",
-        path.basename(req.file.path)
-      );
-      user.profileImage = relativeImagePath.replace(/\\/g, "/");
+      // 새 프로필 이미지 경로 저장 (상대 경로가 아닌 전체 URL 경로로 저장)
+      const imageUrl = `/uploads/profiles/${path.basename(req.file.path)}`;
+      user.profileImage = imageUrl;
       await user.save();
 
       res.json({
+        success: true,
         message: "프로필 이미지가 업로드되었습니다.",
         profileImage: user.profileImage,
       });
