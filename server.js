@@ -213,6 +213,15 @@ const broadcastDinnerCheck = async (data) => {
       return;
     }
 
+    // 프로필 이미지 URL 수정
+    // SERVER_URL이 undefined인 경우를 처리
+    const serverUrl =
+      process.env.SERVER_URL ||
+      "https://port-0-qr-check-server-m5l6sc488b056240.sel4.cloudtype.app";
+    const profileImageUrl = student.profileImage
+      ? `${serverUrl}${student.profileImage}`
+      : null;
+
     const messageData = {
       type: "DINNER_CHECK",
       timestamp: moment().tz("Asia/Seoul").format("YYYY-MM-DD HH:mm:ss"),
@@ -222,13 +231,15 @@ const broadcastDinnerCheck = async (data) => {
         grade: student.grade,
         class: student.class,
         number: student.number,
-        profileImage: student.profileImage ? `${process.env.SERVER_URL}${student.profileImage}` : null,
+        profileImage: profileImageUrl,
         status: data.status || "approved",
       },
     };
 
+    // 디버깅을 위한 로그 추가
+    console.log("Broadcasting message with profile image:", profileImageUrl);
+
     const message = JSON.stringify(messageData);
-    console.log("Broadcasting message:", messageData); // 디버깅용 로그
 
     for (const [clientId, client] of clients.entries()) {
       try {
@@ -241,7 +252,6 @@ const broadcastDinnerCheck = async (data) => {
         }
       } catch (error) {
         console.error(`Broadcast error for client ${clientId}:`, error);
-        // 에러가 발생한 클라이언트 정리
         client.terminate();
         clients.delete(clientId);
         clientStatus.delete(clientId);
@@ -1486,13 +1496,13 @@ app.get("/api/dinner/history", verifyToken, async (req, res) => {
       if (startDate) {
         queryCondition.timestamp.$gte = moment(startDate)
           .tz("Asia/Seoul")
-          .startOf('day')
+          .startOf("day")
           .format("YYYY-MM-DD HH:mm:ss");
       }
       if (endDate) {
         queryCondition.timestamp.$lte = moment(endDate)
           .tz("Asia/Seoul")
-          .endOf('day')
+          .endOf("day")
           .format("YYYY-MM-DD HH:mm:ss");
       }
     }
@@ -1762,15 +1772,20 @@ app.post(
         }
       }
 
-      // 새 프로필 이미지 경로 저장 (상대 경로가 아닌 전체 URL 경로로 저장)
+      // 새 프로필 이미지 경로 저장 (SERVER_URL 제외한 경로만 저장)
       const imageUrl = `/uploads/profiles/${path.basename(req.file.path)}`;
       user.profileImage = imageUrl;
       await user.save();
 
+      // SERVER_URL이 undefined인 경우를 처리
+      const serverUrl =
+        process.env.SERVER_URL ||
+        "https://port-0-qr-check-server-m5l6sc488b056240.sel4.cloudtype.app";
+
       res.json({
         success: true,
         message: "프로필 이미지가 업로드되었습니다.",
-        profileImage: user.profileImage,
+        profileImage: `${serverUrl}${imageUrl}`,
       });
     } catch (error) {
       console.error("프로필 이미지 업로드 오류:", error);
