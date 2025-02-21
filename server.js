@@ -13,57 +13,41 @@ const http = require("http");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs").promises;
+const {
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectCommand,
+} = require("@aws-sdk/client-s3");
+const { Upload } = require("@aws-sdk/lib-storage");
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// 프로필 이미지 저장 디렉토리 설정 수정
-const PROFILE_IMAGE_DIR = path.join(process.cwd(), "uploads", "profiles");
-
-// 프로필 이미지 디렉토리 생성 로직 수정
-(async () => {
-  try {
-    // uploads 디렉토리 먼저 생성
-    await fs.mkdir(path.join(process.cwd(), "uploads"), { recursive: true });
-    // profiles 디렉토리 생성
-    await fs.mkdir(PROFILE_IMAGE_DIR, { recursive: true });
-    console.log("프로필 이미지 디렉토리 생성 완료:", PROFILE_IMAGE_DIR);
-  } catch (error) {
-    console.error("프로필 이미지 디렉토리 생성 중 오류:", error);
-  }
-})();
-
-// Multer 설정 수정
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, PROFILE_IMAGE_DIR);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(
-      null,
-      `${req.params.userId}-${uniqueSuffix}${path.extname(file.originalname)}`
-    );
+// R2 클라이언트 설정
+const r2Client = new S3Client({
+  region: "auto",
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
   },
 });
 
+// Multer 설정 수정 - 메모리 스토리지 사용
+const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: {
     fileSize: 5 * 1024 * 1024, // 5MB 제한
   },
   fileFilter: function (req, file, cb) {
-    // 이미지 파일만 허용
     if (!file.mimetype.startsWith("image/")) {
       return cb(new Error("이미지 파일만 업로드할 수 있습니다."), false);
     }
     cb(null, true);
   },
 });
-
-// 정적 파일 제공 경로 수정
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 // WebSocket 클라이언트 관리
 const clients = new Map();
@@ -213,14 +197,8 @@ const broadcastDinnerCheck = async (data) => {
       return;
     }
 
-    // 프로필 이미지 URL 수정
-    // SERVER_URL이 undefined인 경우를 처리
-    const serverUrl =
-      process.env.SERVER_URL ||
-      "https://port-0-qr-check-server-m5l6sc488b056240.sel4.cloudtype.app";
-    const profileImageUrl = student.profileImage
-      ? `${serverUrl}${student.profileImage}`
-      : null;
+    // 프로필 이미지 URL은 이미 R2 public URL이므로 추가 처리 불필요
+    const profileImageUrl = student.profileImage || null;
 
     const messageData = {
       type: "DINNER_CHECK",
@@ -1283,7 +1261,7 @@ app.post("/api/refresh-token", async (req, res) => {
   }
 });
 
-// 사용자 정보 조회 API
+// 사용자 정보 조회 API 수정
 app.get("/api/student-info", verifyToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select("-password");
@@ -1296,7 +1274,7 @@ app.get("/api/student-info", verifyToken, async (req, res) => {
       grade: user.grade,
       class: user.class,
       number: user.number,
-      profileImage: user.profileImage,
+      profileImage: user.profileImage, // 이미 R2 public URL이므로 그대로 사용
     });
   } catch (error) {
     res.status(500).json({
@@ -1306,7 +1284,7 @@ app.get("/api/student-info", verifyToken, async (req, res) => {
   }
 });
 
-// 관리자용 사용자 목록 조회 API
+// 관리자용 사용자 목록 조회 API 수정
 app.get("/api/admin/users", verifyToken, isAdmin, async (req, res) => {
   try {
     const { grade, class: classNumber } = req.query;
@@ -1315,6 +1293,7 @@ app.get("/api/admin/users", verifyToken, isAdmin, async (req, res) => {
     if (classNumber) query.class = Number(classNumber);
 
     const users = await User.find(query).select("-password");
+    // profileImage는 이미 R2 public URL이므로 추가 처리 불필요
     res.json(users);
   } catch (error) {
     console.error("Error fetching users:", error);
@@ -1436,7 +1415,7 @@ app.post(
   }
 );
 
-// 단일 사용자 정보 조회 API
+// 단일 사용자 정보 조회 API 수정
 app.get("/api/admin/users/:userId", verifyToken, isAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1448,12 +1427,12 @@ app.get("/api/admin/users/:userId", verifyToken, isAdmin, async (req, res) => {
       return res.status(404).json({ message: "사용자를 찾을 수 없습니다." });
     }
 
-    // 디바이스 정보가 있는 경우 응답에 포함
     const device = await Device.findOne({ userId: user._id });
     const responseData = {
       ...user.toObject(),
       deviceInfo: device ? device.deviceInfo : null,
       deviceId: device ? device.deviceId : null,
+      // profileImage는 이미 R2 public URL이므로 추가 처리 불필요
     };
 
     res.json(responseData);
@@ -1742,6 +1721,49 @@ app.put(
   }
 );
 
+// R2에 파일 업로드하는 함수
+async function uploadToR2(file, userId) {
+  try {
+    const fileExtension = path.extname(file.originalname);
+    const key = `profiles/${userId}-${Date.now()}${fileExtension}`;
+
+    const upload = new Upload({
+      client: r2Client,
+      params: {
+        Bucket: process.env.R2_BUCKET_NAME,
+        Key: key,
+        Body: file.buffer,
+        ContentType: file.mimetype,
+      },
+    });
+
+    await upload.done();
+    return `${process.env.R2_PUBLIC_URL}/${key}`;
+  } catch (error) {
+    console.error("R2 업로드 오류:", error);
+    throw new Error("파일 업로드 중 오류가 발생했습니다.");
+  }
+}
+
+// R2에서 파일 삭제하는 함수
+async function deleteFromR2(imageUrl) {
+  try {
+    if (!imageUrl) return;
+
+    const key = imageUrl.replace(process.env.R2_PUBLIC_URL + "/", "");
+
+    await r2Client.send(
+      new DeleteObjectCommand({
+        Bucket: process.env.R2_BUCKET_NAME,
+        Key: key,
+      })
+    );
+  } catch (error) {
+    console.error("R2 삭제 오류:", error);
+    throw new Error("파일 삭제 중 오류가 발생했습니다.");
+  }
+}
+
 // 프로필 이미지 업로드 API 수정
 app.post(
   "/api/admin/users/:userId/profile-image",
@@ -1759,44 +1781,34 @@ app.post(
         return res.status(404).json({ message: "사용자를 찾을 수 없습니다." });
       }
 
-      // 기존 프로필 이미지가 있다면 삭제
+      // 기존 프로필 이미지가 있다면 R2에서 삭제
       if (user.profileImage) {
-        const oldImagePath = path.join(
-          PROFILE_IMAGE_DIR,
-          path.basename(user.profileImage)
-        );
-        try {
-          await fs.unlink(oldImagePath);
-        } catch (error) {
-          console.error("기존 이미지 삭제 실패:", error);
-        }
+        await deleteFromR2(user.profileImage);
       }
 
-      // 새 프로필 이미지 경로 저장 (SERVER_URL 제외한 경로만 저장)
-      const imageUrl = `/uploads/profiles/${path.basename(req.file.path)}`;
+      // 새 이미지를 R2에 업로드
+      const imageUrl = await uploadToR2(req.file, user._id);
+
+      // 사용자 프로필 이미지 URL 업데이트
       user.profileImage = imageUrl;
       await user.save();
-
-      // SERVER_URL이 undefined인 경우를 처리
-      const serverUrl =
-        process.env.SERVER_URL ||
-        "https://port-0-qr-check-server-m5l6sc488b056240.sel4.cloudtype.app";
 
       res.json({
         success: true,
         message: "프로필 이미지가 업로드되었습니다.",
-        profileImage: `${serverUrl}${imageUrl}`,
+        profileImage: imageUrl,
       });
     } catch (error) {
       console.error("프로필 이미지 업로드 오류:", error);
-      res
-        .status(500)
-        .json({ message: "프로필 이미지 업로드 중 오류가 발생했습니다." });
+      res.status(500).json({
+        message: "프로필 이미지 업로드 중 오류가 발생했습니다.",
+        error: error.message,
+      });
     }
   }
 );
 
-// 프로필 이미지 삭제 API
+// 프로필 이미지 삭제 API 수정
 app.delete(
   "/api/admin/users/:userId/profile-image",
   verifyToken,
@@ -1809,16 +1821,7 @@ app.delete(
       }
 
       if (user.profileImage) {
-        const imagePath = path.join(
-          PROFILE_IMAGE_DIR,
-          path.basename(user.profileImage)
-        );
-        try {
-          await fs.unlink(imagePath);
-        } catch (error) {
-          console.error("이미지 파일 삭제 실패:", error);
-        }
-
+        await deleteFromR2(user.profileImage);
         user.profileImage = undefined;
         await user.save();
       }
@@ -1826,9 +1829,10 @@ app.delete(
       res.json({ message: "프로필 이미지가 삭제되었습니다." });
     } catch (error) {
       console.error("프로필 이미지 삭제 오류:", error);
-      res
-        .status(500)
-        .json({ message: "프로필 이미지 삭제 중 오류가 발생했습니다." });
+      res.status(500).json({
+        message: "프로필 이미지 삭제 중 오류가 발생했습니다.",
+        error: error.message,
+      });
     }
   }
 );
