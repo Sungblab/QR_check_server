@@ -2169,7 +2169,6 @@ app.post("/api/admin/users", verifyToken, isAdmin, async (req, res) => {
     const {
       studentId,
       name,
-      password,
       grade,
       class: classNumber,
       number,
@@ -2205,9 +2204,15 @@ app.post("/api/admin/users", verifyToken, isAdmin, async (req, res) => {
       return res.status(400).json({ message: "이미 존재하는 학번입니다." });
     }
 
+    // 8자리 난수 생성 (숫자 + 영문자)
+    const randomPassword = Array.from(crypto.randomBytes(4))
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("")
+      .toUpperCase();
+
     // 비밀번호 해싱
     const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
+    const hashedPassword = await bcrypt.hash(randomPassword, salt);
 
     // 새 사용자 생성
     const user = new User({
@@ -2234,6 +2239,7 @@ app.post("/api/admin/users", verifyToken, isAdmin, async (req, res) => {
         number: user.number,
         isApproved: user.isApproved,
       },
+      initialPassword: randomPassword, // 초기 비밀번호 반환
     });
   } catch (error) {
     console.error("사용자 추가 오류:", error);
