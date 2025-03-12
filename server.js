@@ -1387,26 +1387,33 @@ app.post(
   isAdmin,
   async (req, res) => {
     try {
-      const { userId } = req.body;
+      const { userId, customPassword } = req.body;
       const user = await User.findById(userId);
       if (!user) {
         return res.status(404).json({ message: "사용자를 찾을 수 없습니다." });
       }
 
-      // 8자리 난수 생성 (숫자 + 영문자)
-      const randomPassword = Array.from(crypto.randomBytes(4))
-        .map((byte) => byte.toString(16).padStart(2, "0"))
-        .join("")
-        .toUpperCase();
+      let newPassword;
+
+      // 사용자 지정 비밀번호가 있으면 사용, 없으면 랜덤 생성
+      if (customPassword) {
+        newPassword = customPassword;
+      } else {
+        // 8자리 난수 생성 (숫자 + 영문자)
+        newPassword = Array.from(crypto.randomBytes(4))
+          .map((byte) => byte.toString(16).padStart(2, "0"))
+          .join("")
+          .toUpperCase();
+      }
 
       const salt = await bcrypt.genSalt(10);
-      const hashedPassword = await bcrypt.hash(randomPassword, salt);
+      const hashedPassword = await bcrypt.hash(newPassword, salt);
       user.password = hashedPassword;
       await user.save();
 
       res.json({
         message: "비밀번호가 초기화되었습니다.",
-        newPassword: randomPassword,
+        newPassword: newPassword,
       });
     } catch (error) {
       console.error("비밀번호 초기화 중 오류 발생:", error);
@@ -2173,6 +2180,7 @@ app.post("/api/admin/users", verifyToken, isAdmin, async (req, res) => {
       class: classNumber,
       number,
       isApproved,
+      customPassword,
     } = req.body;
 
     // 학번 형식 검증 (4자리 숫자)
@@ -2204,15 +2212,22 @@ app.post("/api/admin/users", verifyToken, isAdmin, async (req, res) => {
       return res.status(400).json({ message: "이미 존재하는 학번입니다." });
     }
 
-    // 8자리 난수 생성 (숫자 + 영문자)
-    const randomPassword = Array.from(crypto.randomBytes(4))
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join("")
-      .toUpperCase();
+    let initialPassword;
+
+    // 사용자 지정 비밀번호가 있으면 사용, 없으면 랜덤 생성
+    if (customPassword) {
+      initialPassword = customPassword;
+    } else {
+      // 8자리 난수 생성 (숫자 + 영문자)
+      initialPassword = Array.from(crypto.randomBytes(4))
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("")
+        .toUpperCase();
+    }
 
     // 비밀번호 해싱
     const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(randomPassword, salt);
+    const hashedPassword = await bcrypt.hash(initialPassword, salt);
 
     // 새 사용자 생성
     const user = new User({
@@ -2239,7 +2254,7 @@ app.post("/api/admin/users", verifyToken, isAdmin, async (req, res) => {
         number: user.number,
         isApproved: user.isApproved,
       },
-      initialPassword: randomPassword, // 초기 비밀번호 반환
+      initialPassword: initialPassword, // 초기 비밀번호 반환
     });
   } catch (error) {
     console.error("사용자 추가 오류:", error);
@@ -2453,6 +2468,128 @@ function broadcastDinnerStatus(data) {
     }
   }
 }
+
+// 관리자용 대량 사용자 추가 API
+app.post("/api/admin/bulk-users", verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { users, commonPassword, grade, class: classNumber } = req.body;
+
+    if (!Array.isArray(users) || users.length === 0) {
+      return res
+        .status(400)
+        .json({ message: "유효한 사용자 목록이 필요합니다." });
+    }
+
+    // 학년, 반 검증
+    if (![1, 2, 3].includes(grade)) {
+      return res.status(400).json({ message: "유효하지 않은 학년입니다." });
+    }
+    if (classNumber < 1 || classNumber > 6) {
+      return res.status(400).json({ message: "유효하지 않은 반입니다." });
+    }
+
+    // 공통 비밀번호 설정
+    let initialPassword = commonPassword;
+    if (!initialPassword) {
+      // 8자리 난수 생성 (숫자 + 영문자)
+      initialPassword = Array.from(crypto.randomBytes(4))
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("")
+        .toUpperCase();
+    }
+
+    // 비밀번호 해싱
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(initialPassword, salt);
+
+    const results = [];
+    const errors = [];
+
+    // 각 사용자 처리
+    for (const userData of users) {
+      try {
+        const { studentId, name, number } = userData;
+
+        // 학번 형식 검증 (4자리 숫자)
+        if (!/^\d{4}$/.test(studentId)) {
+          errors.push({
+            studentId,
+            name,
+            error: "학번은 4자리 숫자여야 합니다.",
+          });
+          continue;
+        }
+
+        // 이름 형식 검증 (2-4자 한글)
+        if (!/^[가-힣]{2,4}$/.test(name)) {
+          errors.push({
+            studentId,
+            name,
+            error: "이름은 2-4자의 한글이어야 합니다.",
+          });
+          continue;
+        }
+
+        // 번호 검증
+        const numberNum = Number(number);
+        if (isNaN(numberNum) || numberNum < 1 || numberNum > 100) {
+          errors.push({ studentId, name, error: "유효하지 않은 번호입니다." });
+          continue;
+        }
+
+        // 기존 사용자 확인
+        let existingUser = await User.findOne({ studentId });
+        if (existingUser) {
+          errors.push({ studentId, name, error: "이미 존재하는 학번입니다." });
+          continue;
+        }
+
+        // 새 사용자 생성
+        const user = new User({
+          studentId,
+          name,
+          password: hashedPassword,
+          grade,
+          class: classNumber,
+          number: numberNum,
+          isApproved: true,
+        });
+
+        await user.save();
+
+        results.push({
+          id: user._id,
+          studentId: user.studentId,
+          name: user.name,
+          grade: user.grade,
+          class: user.class,
+          number: user.number,
+        });
+      } catch (error) {
+        console.error("사용자 추가 오류:", error);
+        errors.push({
+          studentId: userData.studentId,
+          name: userData.name,
+          error: "처리 중 오류가 발생했습니다.",
+        });
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      message: `${results.length}명의 사용자가 추가되었습니다.`,
+      results,
+      errors,
+      initialPassword, // 공통 초기 비밀번호 반환
+    });
+  } catch (error) {
+    console.error("대량 사용자 추가 오류:", error);
+    res.status(500).json({
+      success: false,
+      message: "사용자 추가 중 오류가 발생했습니다.",
+    });
+  }
+});
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
